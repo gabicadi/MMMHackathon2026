@@ -65,6 +65,39 @@ type DataRow = {
   social_spend_clean: number;
 };
 
+type BaselineRefs = {
+  refTv23: number;
+  refTv24: number;
+  refSearch: number;
+  refSocial: number;
+};
+
+type BaselineOK = {
+  tv23: number[];
+  tv24: number[];
+  se: number[];
+  so: number[];
+  yPred: number[];
+  tvHill23: number[];
+  tvHill24: number[];
+  seHill: number[];
+  soHill: number[];
+  refs: BaselineRefs;
+  baseSalesTotal: number;
+  baseTotals: {
+    tv_2023: number;
+    tv_2024_2025: number;
+    search: number;
+    social: number;
+  };
+};
+
+type BaselineResult = BaselineOK | { error: string };
+
+function isBaselineOK(b: BaselineResult | null): b is BaselineOK {
+  return !!b && !("error" in b);
+}
+
 // -----------------------------
 // Utilities
 // -----------------------------
@@ -80,9 +113,6 @@ function safeNum(v: any) {
 }
 function sum(arr: number[]) {
   return arr.reduce((a, b) => a + b, 0);
-}
-function clamp(n: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, n));
 }
 
 // Minimal CSV parser (no deps). Handles CRLF/LF, no quoted commas.
@@ -170,6 +200,11 @@ function runSelfTests() {
   console.assert(Math.abs(ad[0] - 1) < 1e-9, "adstock t0 failed");
   console.assert(Math.abs(ad[1] - 0.5) < 1e-9, "adstock t1 failed");
   console.assert(Math.abs(ad[2] - 0.25) < 1e-9, "adstock t2 failed");
+
+  // Extra tests for scaleToTotal edge cases
+  console.assert(sum(scaleToTotal([0, 0, 0], 10)) === 0, "scaleToTotal zero baseline failed");
+  const scaled = scaleToTotal([1, 1], 10);
+  console.assert(Math.abs(sum(scaled) - 10) < 1e-9, "scaleToTotal sum preservation failed");
 }
 
 if (typeof window !== "undefined") {
@@ -205,7 +240,13 @@ function Divider() {
   return <div style={{ height: 1, background: "#e2e8f0", margin: "14px 0" }} />;
 }
 
-function Btn(props: React.PropsWithChildren<{ onClick?: () => void; variant?: "primary" | "secondary"; disabled?: boolean }>) {
+function Btn(
+  props: React.PropsWithChildren<{
+    onClick?: () => void;
+    variant?: "primary" | "secondary";
+    disabled?: boolean;
+  }>
+) {
   const isSecondary = props.variant === "secondary";
   return (
     <button
@@ -257,7 +298,13 @@ function SliderRow(props: {
 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
         <div style={{ fontSize: 13, fontWeight: 600, color: "#0f172a" }}>{props.label}</div>
         <div style={{ fontSize: 13, color: "#334155" }}>{formatFloat(props.value)}</div>
       </div>
@@ -269,7 +316,14 @@ function SliderRow(props: {
         value={props.value}
         onChange={(e) => props.onChange(Number(e.target.value))}
       />
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#64748b" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          fontSize: 11,
+          color: "#64748b",
+        }}
+      >
         <span>{formatFloat(props.min)}</span>
         <span>{formatFloat(props.max)}</span>
       </div>
@@ -459,7 +513,7 @@ export default function App() {
     }
   }
 
-  const baseline = useMemo(() => {
+  const baseline: BaselineResult | null = useMemo(() => {
     if (!data || !params || !yPred) return null;
     if (yPred.length !== data.length) {
       return { error: `y_pred length (${yPred.length}) must match inputs rows (${data.length}).` };
@@ -507,22 +561,31 @@ export default function App() {
   }, [data, params, yPred]);
 
   const scenario = useMemo(() => {
-    if (!baseline || (baseline as any).error || !params || !data) return null;
+    if (!isBaselineOK(baseline) || !params || !data) return null;
 
-    const tv23New = scaleToTotal(baseline.tv23, totals.tv_2023);
-    const tv24New = scaleToTotal(baseline.tv24, totals.tv_2024_2025);
-    const seNew = scaleToTotal(baseline.se, totals.search);
-    const soNew = scaleToTotal(baseline.so, totals.social);
+    // Fix 2: allow defensive defaults in case baseline arrays are missing
+    const tv23New = scaleToTotal(baseline.tv23 ?? [], totals.tv_2023);
+    const tv24New = scaleToTotal(baseline.tv24 ?? [], totals.tv_2024_2025);
+    const seNew = scaleToTotal(baseline.se ?? [], totals.search);
+    const soNew = scaleToTotal(baseline.so ?? [], totals.social);
 
     const tvAd23 = adstockGeometric(tv23New, params.TV.alpha);
     const tvAd24 = adstockGeometric(tv24New, params.TV.alpha);
     const seAd = adstockGeometric(seNew, params.Search.alpha);
     const soAd = adstockGeometric(soNew, params.Social.alpha);
 
-    const tvHill23 = tvAd23.map((a) => hill(baseline.refs.refTv23 > 0 ? a / baseline.refs.refTv23 : 0, params.TV.k, params.TV.s));
-    const tvHill24 = tvAd24.map((a) => hill(baseline.refs.refTv24 > 0 ? a / baseline.refs.refTv24 : 0, params.TV.k, params.TV.s));
-    const seHill = seAd.map((a) => hill(baseline.refs.refSearch > 0 ? a / baseline.refs.refSearch : 0, params.Search.k, params.Search.s));
-    const soHill = soAd.map((a) => hill(baseline.refs.refSocial > 0 ? a / baseline.refs.refSocial : 0, params.Social.k, params.Social.s));
+    // Fix 3: guard refs
+    const refs: BaselineRefs = baseline.refs ?? {
+      refTv23: 0,
+      refTv24: 0,
+      refSearch: 0,
+      refSocial: 0,
+    };
+
+    const tvHill23 = tvAd23.map((a) => hill(refs.refTv23 > 0 ? a / refs.refTv23 : 0, params.TV.k, params.TV.s));
+    const tvHill24 = tvAd24.map((a) => hill(refs.refTv24 > 0 ? a / refs.refTv24 : 0, params.TV.k, params.TV.s));
+    const seHill = seAd.map((a) => hill(refs.refSearch > 0 ? a / refs.refSearch : 0, params.Search.k, params.Search.s));
+    const soHill = soAd.map((a) => hill(refs.refSocial > 0 ? a / refs.refSocial : 0, params.Social.k, params.Social.s));
 
     const yNew = baseline.yPred.map((y, i) => {
       const dTv23 = params.coef.tv_2023_transformed * (tvHill23[i] - baseline.tvHill23[i]);
@@ -537,8 +600,8 @@ export default function App() {
     // Per-channel deltas (contribution change vs baseline)
     const dTv23 = baseline.yPred.map((_, i) => params.coef.tv_2023_transformed * (tvHill23[i] - baseline.tvHill23[i]));
     const dTv24 = baseline.yPred.map((_, i) => params.coef.tv_2024_2025_transformed * (tvHill24[i] - baseline.tvHill24[i]));
-    const dSe   = baseline.yPred.map((_, i) => params.coef.search_transformed * (seHill[i] - baseline.seHill[i]));
-    const dSo   = baseline.yPred.map((_, i) => params.coef.social_transformed * (soHill[i] - baseline.soHill[i]));
+    const dSe = baseline.yPred.map((_, i) => params.coef.search_transformed * (seHill[i] - baseline.seHill[i]));
+    const dSo = baseline.yPred.map((_, i) => params.coef.social_transformed * (soHill[i] - baseline.soHill[i]));
 
     return {
       totalSales,
@@ -564,7 +627,7 @@ export default function App() {
   }, [baseline, params, totals, data]);
 
   const sliderBounds = useMemo(() => {
-    if (!baseline || (baseline as any).error) {
+    if (!isBaselineOK(baseline)) {
       return {
         tv_2023: { min: 0, max: 100, step: 1 },
         tv_2024_2025: { min: 0, max: 100, step: 1 },
@@ -573,7 +636,11 @@ export default function App() {
       };
     }
     const b = baseline.baseTotals;
-    const make = (v: number) => ({ min: 0, max: Math.max(1, v * 2.0), step: Math.max(0.1, v / 200) });
+    const make = (v: number) => ({
+      min: 0,
+      max: Math.max(1, v * 2.0),
+      step: Math.max(0.1, v / 200),
+    });
     return {
       tv_2023: make(b.tv_2023),
       tv_2024_2025: make(b.tv_2024_2025),
@@ -596,17 +663,24 @@ export default function App() {
   const COLORS = ["#0f172a", "#334155", "#64748b", "#94a3b8"]; // neutral
 
   function resetToBaseline() {
-    if (!baseline || (baseline as any).error) return;
+    if (!isBaselineOK(baseline)) return;
     setTotals({ ...baseline.baseTotals });
   }
 
-  const ready = !!(params && data && yPred && baseline && !(baseline as any).error);
+  const ready = !!(params && data && yPred && isBaselineOK(baseline));
 
   return (
     <div style={{ minHeight: "100vh", background: "#f8fafc", color: "#0f172a" }}>
       <div style={{ maxWidth: 1100, margin: "0 auto", padding: 18 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+              gap: 12,
+            }}
+          >
             <div>
               <div style={{ fontSize: 22, fontWeight: 800 }}>MMM Scenario Planner</div>
               <div style={{ fontSize: 13, color: "#475569", marginTop: 4 }}>
@@ -624,28 +698,54 @@ export default function App() {
           </div>
 
           <Card title="1) Upload artifacts">
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                gap: 12,
+              }}
+            >
               <div>
                 <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>scenario_inputs.csv</div>
-                <input type="file" accept=".csv,text/csv" onChange={(e) => e.target.files?.[0] && loadInputsCsv(e.target.files[0])} />
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={(e) => e.target.files?.[0] && loadInputsCsv(e.target.files[0])}
+                />
                 <div style={{ fontSize: 11, color: "#64748b", marginTop: 6 }}>
                   Columns: date, tv_2023, tv_2024_2025, search_spend_clean, social_spend_clean
                 </div>
               </div>
               <div>
                 <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>y_pred.csv</div>
-                <input type="file" accept=".csv,text/csv" onChange={(e) => e.target.files?.[0] && loadYPred(e.target.files[0])} />
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={(e) => e.target.files?.[0] && loadYPred(e.target.files[0])}
+                />
                 <div style={{ fontSize: 11, color: "#64748b", marginTop: 6 }}>Single column: y_pred</div>
               </div>
               <div>
                 <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>scenario_params.json</div>
-                <input type="file" accept="application/json" onChange={(e) => e.target.files?.[0] && loadParams(e.target.files[0])} />
+                <input
+                  type="file"
+                  accept="application/json"
+                  onChange={(e) => e.target.files?.[0] && loadParams(e.target.files[0])}
+                />
                 <div style={{ fontSize: 11, color: "#64748b", marginTop: 6 }}>alpha/k/s, ref_max_adstock, coef</div>
               </div>
             </div>
 
             {errors.length > 0 ? (
-              <div style={{ marginTop: 10, padding: 10, borderRadius: 14, background: "#fff1f2", border: "1px solid #fecdd3" }}>
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: 10,
+                  borderRadius: 14,
+                  background: "#fff1f2",
+                  border: "1px solid #fecdd3",
+                }}
+              >
                 <div style={{ fontSize: 12, fontWeight: 800, color: "#881337" }}>Errors</div>
                 <ul style={{ marginTop: 6, paddingLeft: 18, fontSize: 12, color: "#881337" }}>
                   {errors.map((e, i) => (
@@ -655,15 +755,32 @@ export default function App() {
               </div>
             ) : null}
 
-            {baseline && (baseline as any).error ? (
-              <div style={{ marginTop: 10, padding: 10, borderRadius: 14, background: "#fffbeb", border: "1px solid #fde68a", color: "#92400e", fontSize: 12 }}>
-                {(baseline as any).error}
+            {baseline && "error" in baseline ? (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: 10,
+                  borderRadius: 14,
+                  background: "#fffbeb",
+                  border: "1px solid #fde68a",
+                  color: "#92400e",
+                  fontSize: 12,
+                }}
+              >
+                {baseline.error}
               </div>
             ) : null}
           </Card>
 
           <Card title="2) Scenario controls">
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignItems: "start" }}>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                gap: 12,
+                alignItems: "start",
+              }}
+            >
               <div style={{ gridColumn: "span 2" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                   <div>
@@ -680,97 +797,37 @@ export default function App() {
 
                 <Divider />
 
-                <div style={{ height: 280, border: "1px solid #e2e8f0", borderRadius: 16, padding: 10, background: "#ffffff" }}>
-                  <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8 }}>
-                    Weekly stacked contribution layer chart
-                  </div>
+                <div
+                  style={{
+                    height: 280,
+                    border: "1px solid #e2e8f0",
+                    borderRadius: 16,
+                    padding: 10,
+                    background: "#ffffff",
+                  }}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8 }}>Weekly stacked contribution layer chart</div>
                   <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8 }}>
                     Baseline prediction plus per-channel scenario deltas (TV 2023, TV 2024–25, Search, Social). Sum equals scenario.
                   </div>
                   <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart
-                      data={scenario?.chart || []}
-                      margin={{ top: 10, right: 20, left: 0, bottom: 0 }}
-                      stackOffset="sign"
-                    >
+                    <AreaChart data={scenario?.chart || []} margin={{ top: 10, right: 20, left: 0, bottom: 0 }} stackOffset="sign">
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="date" hide />
                       <YAxis tickFormatter={(v) => String(Math.round(v))} />
-                      <Tooltip
-                        formatter={(value: any, name: any) => [formatInt(Number(value)), String(name)]}
-                        labelFormatter={(l) => `Date: ${l}`}
-                      />
+                      <Tooltip formatter={(value: any, name: any) => [formatInt(Number(value)), String(name)]} labelFormatter={(l) => `Date: ${l}`} />
 
                       {/* Base layer */}
-                      <Area
-                        type="monotone"
-                        dataKey="base"
-                        name="Baseline prediction"
-                        stackId="1"
-                        stroke="#64748b"
-                        fill="#94a3b8"
-                        fillOpacity={0.45}
-                        strokeWidth={1.5}
-                        dot={false}
-                      />
+                      <Area type="monotone" dataKey="base" name="Baseline prediction" stackId="1" stroke="#64748b" fill="#94a3b8" fillOpacity={0.45} strokeWidth={1.5} dot={false} />
 
                       {/* Delta layers */}
-                      <Area
-                        type="monotone"
-                        dataKey="tv_2023"
-                        name="TV 2023 delta"
-                        stackId="1"
-                        stroke="#0f172a"
-                        fill="#0f172a"
-                        fillOpacity={0.18}
-                        strokeWidth={1.2}
-                        dot={false}
-                      />
-                      <Area
-                        type="monotone"
-                        dataKey="tv_2024_2025"
-                        name="TV 2024–25 delta"
-                        stackId="1"
-                        stroke="#334155"
-                        fill="#334155"
-                        fillOpacity={0.16}
-                        strokeWidth={1.2}
-                        dot={false}
-                      />
-                      <Area
-                        type="monotone"
-                        dataKey="search"
-                        name="Search delta"
-                        stackId="1"
-                        stroke="#475569"
-                        fill="#475569"
-                        fillOpacity={0.14}
-                        strokeWidth={1.2}
-                        dot={false}
-                      />
-                      <Area
-                        type="monotone"
-                        dataKey="social"
-                        name="Social delta"
-                        stackId="1"
-                        stroke="#64748b"
-                        fill="#64748b"
-                        fillOpacity={0.12}
-                        strokeWidth={1.2}
-                        dot={false}
-                      />
+                      <Area type="monotone" dataKey="tv_2023" name="TV 2023 delta" stackId="1" stroke="#0f172a" fill="#0f172a" fillOpacity={0.18} strokeWidth={1.2} dot={false} />
+                      <Area type="monotone" dataKey="tv_2024_2025" name="TV 2024–25 delta" stackId="1" stroke="#334155" fill="#334155" fillOpacity={0.16} strokeWidth={1.2} dot={false} />
+                      <Area type="monotone" dataKey="search" name="Search delta" stackId="1" stroke="#475569" fill="#475569" fillOpacity={0.14} strokeWidth={1.2} dot={false} />
+                      <Area type="monotone" dataKey="social" name="Social delta" stackId="1" stroke="#64748b" fill="#64748b" fillOpacity={0.12} strokeWidth={1.2} dot={false} />
 
                       {/* Optional outline of scenario total (no fill) */}
-                      <Area
-                        type="monotone"
-                        dataKey="scenario"
-                        name="Scenario total"
-                        stroke="#111827"
-                        fillOpacity={0}
-                        strokeWidth={2}
-                        dot={false}
-                        isAnimationActive={false}
-                      />
+                      <Area type="monotone" dataKey="scenario" name="Scenario total" stroke="#111827" fillOpacity={0} strokeWidth={2} dot={false} isAnimationActive={false} />
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
@@ -784,9 +841,7 @@ export default function App() {
                   </div>
                   <div style={{ fontSize: 12, color: "#64748b" }}>
                     {scenario
-                      ? `Total: ${formatFloat(
-                          scenario.totals.tv_2023 + scenario.totals.tv_2024_2025 + scenario.totals.search + scenario.totals.social
-                        )}`
+                      ? `Total: ${formatFloat(scenario.totals.tv_2023 + scenario.totals.tv_2024_2025 + scenario.totals.search + scenario.totals.social)}`
                       : "—"}
                   </div>
                 </div>
@@ -794,38 +849,10 @@ export default function App() {
                 <Divider />
 
                 <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                  <SliderRow
-                    label="TV 2023"
-                    value={totals.tv_2023}
-                    min={sliderBounds.tv_2023.min}
-                    max={sliderBounds.tv_2023.max}
-                    step={sliderBounds.tv_2023.step}
-                    onChange={(v) => setTotals((p) => ({ ...p, tv_2023: v }))}
-                  />
-                  <SliderRow
-                    label="TV 2024–25"
-                    value={totals.tv_2024_2025}
-                    min={sliderBounds.tv_2024_2025.min}
-                    max={sliderBounds.tv_2024_2025.max}
-                    step={sliderBounds.tv_2024_2025.step}
-                    onChange={(v) => setTotals((p) => ({ ...p, tv_2024_2025: v }))}
-                  />
-                  <SliderRow
-                    label="Search"
-                    value={totals.search}
-                    min={sliderBounds.search.min}
-                    max={sliderBounds.search.max}
-                    step={sliderBounds.search.step}
-                    onChange={(v) => setTotals((p) => ({ ...p, search: v }))}
-                  />
-                  <SliderRow
-                    label="Social"
-                    value={totals.social}
-                    min={sliderBounds.social.min}
-                    max={sliderBounds.social.max}
-                    step={sliderBounds.social.step}
-                    onChange={(v) => setTotals((p) => ({ ...p, social: v }))}
-                  />
+                  <SliderRow label="TV 2023" value={totals.tv_2023} min={sliderBounds.tv_2023.min} max={sliderBounds.tv_2023.max} step={sliderBounds.tv_2023.step} onChange={(v) => setTotals((p) => ({ ...p, tv_2023: v }))} />
+                  <SliderRow label="TV 2024–25" value={totals.tv_2024_2025} min={sliderBounds.tv_2024_2025.min} max={sliderBounds.tv_2024_2025.max} step={sliderBounds.tv_2024_2025.step} onChange={(v) => setTotals((p) => ({ ...p, tv_2024_2025: v }))} />
+                  <SliderRow label="Search" value={totals.search} min={sliderBounds.search.min} max={sliderBounds.search.max} step={sliderBounds.search.step} onChange={(v) => setTotals((p) => ({ ...p, search: v }))} />
+                  <SliderRow label="Social" value={totals.social} min={sliderBounds.social.min} max={sliderBounds.social.max} step={sliderBounds.social.step} onChange={(v) => setTotals((p) => ({ ...p, social: v }))} />
                 </div>
 
                 <Divider />
@@ -842,9 +869,7 @@ export default function App() {
                         cx="50%"
                         cy="50%"
                         outerRadius={78}
-                        label={(entry: any) =>
-                          pieTotal > 0 ? `${entry.name}: ${Math.round((entry.value / pieTotal) * 100)}%` : entry.name
-                        }
+                        label={(entry: any) => (pieTotal > 0 ? `${entry.name}: ${Math.round((entry.value / pieTotal) * 100)}%` : entry.name)}
                       >
                         {pieData.map((_, i) => (
                           <Cell key={i} fill={COLORS[i % COLORS.length]} />
@@ -865,7 +890,17 @@ export default function App() {
                 ) : null}
 
                 {params ? (
-                  <div style={{ marginTop: 10, padding: 10, borderRadius: 14, background: "#f8fafc", border: "1px solid #e2e8f0", fontSize: 12, color: "#334155" }}>
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: 10,
+                      borderRadius: 14,
+                      background: "#f8fafc",
+                      border: "1px solid #e2e8f0",
+                      fontSize: 12,
+                      color: "#334155",
+                    }}
+                  >
                     <div style={{ fontWeight: 800, color: "#0f172a" }}>Loaded parameters</div>
                     <div style={{ marginTop: 4 }}>
                       Adstock α — TV: {params.TV.alpha}, Search: {params.Search.alpha}, Social: {params.Social.alpha}
